@@ -1,0 +1,38 @@
+name: Test Wielowątkowego EPG
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Pobieranie repozytorium
+        uses: actions/checkout@v4
+
+      - name: Konfiguracja środowiska Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Instalacja wymaganych bibliotek
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml
+
+      - name: Uruchomienie skryptu EPG (Multi)
+        run: python onet_test_multi.py
+
+      - name: Zapis wyników do repozytorium
+        run: |
+          git config --global user.name "EPG-Test-Bot"
+          git config --global user.email "bot@example.com"
+          git add -A
+          git diff --quiet && git diff --staged --quiet || git commit -m "Test wielowątkowości EPG"
+          git push
