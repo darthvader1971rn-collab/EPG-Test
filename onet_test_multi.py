@@ -5,18 +5,21 @@ import os
 import time
 import re
 import concurrent.futures
+import gzip
+import xml.etree.ElementTree as ET
 
 start_time_pomiar = time.time()
 
 # --- KONFIGURACJA ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILE = os.path.join(BASE_DIR, "epg_onet_multi.xml")
+OUTPUT_FILE = os.path.join(BASE_DIR, "epg_onet_multi.xml.gz")
+EXTERNAL_EPG_URL = "https://iptv.otopay.io/guide.xml"
 
-DAYS_TO_FETCH = 2 
+DAYS_TO_FETCH = 5 
 DEEP_SCAN = True 
-MAX_WORKERS = 10 # Liczba jednoczesnych połączeń (10 to bezpieczne i bardzo szybkie ustawienie)
+MAX_WORKERS = 10 
 
-# --- LISTA KANAŁÓW ---
+# --- KOSZYK 1: KANAŁY Z ONETU ---
 CHANNELS = {
     "13 Ulica": ("13-ulica-hd-509", "13Ulica.pl"),
     "2x2 HD": ("2x2-hd-613", "2x2HD.pl"),
@@ -290,20 +293,107 @@ CHANNELS = {
     "Polsat Sport Prem 2 (v2)": ("polsat-sport-premium-2-640", "PolsatSportPrem2v2.pl"),
 }
 
-# Zaawansowane nagłówki maskujące bota (udajemy przeglądarkę Chrome na Windowsie)
+# --- KOSZYK 2: KANAŁY Z OTOPAY (ZEWNĘTRZNE) ---
+EXTERNAL_CHANNELS = {
+    "3_1880": "TVPKultura2HD.pl",
+    "3_1671": "TVPuls2HD.pl",
+    "3_1836": "iTVNHD.pl",
+    "3_1837": "iTVNExtraHD.pl",
+    "3_358": "TVRepublika.pl",
+    "3_1871": "TVRepublikaHD.pl",
+    "3_1999": "TVBiznesowa.pl",
+    "3_891": "FoxNews.pl",
+    "3_1979": "TVNKultoweSeriale.pl",
+    "3_2003": "TVNMilionerzy.pl",
+    "3_1982": "TVNKryminalnie.pl",
+    "3_1985": "TVNTelenowele.pl",
+    "3_2038": "TVNCzasNaSlub.pl",
+    "3_1987": "TVNSerialeOKobietach.pl",
+    "3_1992": "TVNPrawoIZycie.pl",
+    "3_1980": "TVNRajskaMilosc.pl",
+    "3_1981": "TVNTalkShow.pl",
+    "3_2007": "TVNPoraNaShow.pl",
+    "3_1983": "TVNMomentyPrawdy.pl",
+    "3_1984": "TVNZycieJakWBajce.pl",
+    "3_1986": "TVNSzpitalneHistorie.pl",
+    "3_1988": "TVNSzkolaZycia.pl",
+    "3_1989": "TVNWDomu.pl",
+    "3_1991": "TVNUsterka.pl",
+    "3_2001": "TVCSuper.pl",
+    "3_1978": "TVNRewolucjeWKuchni.pl",
+    "3_2039": "TVNKulinarnePodroze.pl",
+    "3_2037": "TVNPatrol.pl",
+    "3_1990": "TVNMoto.pl",
+    "3_570": "FastFunBox2.pl",
+    "3_985": "InUltraTVUHDPL.pl",
+    "3_537": "RedCarpet.pl",
+    "3_1834": "KapitanBombaTV.pl",
+    "3_1835": "PorucznikKabura.pl",
+    "3_518": "Paramount.pl",
+    "3_510": "StopklatkaTV.pl",
+    "3_1862": "FilmBoxArtHouse2.pl",
+    "3_476": "PolsatCI.pl",
+    "3_2026": "ViasatTrueCrime.pl",
+    "3_344": "CBSReality.pl",
+    "3_508": "InvestigationDiscovery.pl",
+    "3_360": "NatGeo.pl",
+    "3_449": "NatGeoWild.pl",
+    "3_853": "LoveNature4KPL.pl",
+    "3_1793": "TVPHistoria2.pl",
+    "3_852": "Museum4K.pl",
+    "3_2027": "CanalPlusExtra1HD.pl",
+    "3_1878": "CanalPlusExtra1.pl",
+    "3_2028": "CanalPlusExtra2HD.pl",
+    "3_2029": "CanalPlusExtra3HD.pl",
+    "3_2030": "CanalPlusExtra4HD.pl",
+    "3_2040": "CanalPlusExtra5HD.pl",
+    "3_2041": "CanalPlusExtra6HD.pl",
+    "3_2042": "CanalPlusExtra7HD.pl",
+    "3_452": "PolsatSportPrem1.pl",
+    "3_417": "PolsatSportPrem2.pl",
+    "3_1607": "PolsatSportPrem1v2.pl",
+    "3_1608": "PolsatSportPrem2v2.pl",
+    "3_1889": "CanalPlusSportCZ.pl",
+    "3_385": "ExtremeSportsHD.pl",
+    "3_1863": "PrimeFightHD.pl",
+    "3_1663": "FightSportsHD.pl",
+    "3_1000": "PPV1.pl",
+    "3_1317": "PPV2.pl",
+    "3_1718": "PPV3.pl",
+    "3_2006": "PPV4.pl",
+    "3_1875": "CanalPlusLive2.pl",
+    "3_1876": "CanalPlusLive3.pl",
+    "3_1877": "CanalPlusLive4.pl",
+    "3_387": "CanalPlusNow.pl",
+    "3_1774": "ViaplaySports1.pl",
+    "3_1775": "ViaplaySports2.pl",
+    "3_1806": "ViaplaySports3.pl",
+    "3_1807": "ViaplaySports4.pl",
+    "3_1828": "ViaplaySports5.pl",
+    "3_1829": "ViaplaySports6.pl",
+    "3_1830": "ViaplaySports7.pl",
+    "3_1831": "ViaplaySports8.pl",
+    "3_1881": "TVPABC2HD.pl",
+    "3_409": "NickMusic.pl",
+    "3_1857": "DuckTVPlus.pl",
+    "3_2002": "SzlagierTV.pl",
+    "3_580": "FirstMusicChannelHD.pl",
+    "3_1866": "JazzTVHD.pl",
+    "3_1833": "TVToya.pl",
+    "3_1601": "KujawyTV.pl",
+    "3_842": "CNNInternationalHD.pl",
+    "3_744": "BBCWorldNewsEuropeHD.pl",
+    "3_938": "CNBCEuropeHD.pl"
+}
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
     "Upgrade-Insecure-Requests": "1"
 }
 
 def get_deep_details(url):
-    """Pobiera opisy, aktorów, reżyserów i ograniczenia wiekowe z podstrony audycji."""
     full_url = f"https://programtv.onet.pl{url}"
     try:
         r = requests.get(full_url, headers=HEADERS, timeout=7)
@@ -340,19 +430,14 @@ def get_deep_details(url):
     except: return "", [], [], "", ""
 
 def process_channel(name, slug, m3u_id):
-    """Funkcja robocza dla jednego wątku - pobiera wszystkie dni dla zadanego kanału."""
     channel_xml = ""
     added = 0
-    
     for day_off in range(DAYS_TO_FETCH):
         date_curr = datetime.datetime.now() + datetime.timedelta(days=day_off)
         url = f"https://programtv.onet.pl/program-tv/{slug}?dzien={day_off}&pelny-dzien=1"
-        
         try:
             r = requests.get(url, headers=HEADERS, timeout=15)
             soup = BeautifulSoup(r.text, 'lxml')
-            
-            # Wyszukujemy elementy listy zawierające tytuły (bardziej uniwersalne)
             items = [li for li in soup.find_all('li') if li.find('div', class_='titles')]
 
             last_h, shift = -1, 0
@@ -396,49 +481,91 @@ def process_channel(name, slug, m3u_id):
                 if rate: channel_xml += f'    <star-rating><value>{rate}</value></star-rating>\n'
                 channel_xml += f'  </programme>\n'
                 added += 1
-
-            time.sleep(0.05) # Delikatne opóźnienie dla stabilności
+            time.sleep(0.05)
         except Exception as e:
-            print(f"BŁĄD dla {name} (dzień {day_off}): {e}")
-            
-    print(f"Zakończono: {name:20} -> Pobrano audycji: {added}")
+            pass
+    print(f"Onet zakończono: {name:20} -> {added} audycji")
     return channel_xml
 
-def get_epg_multi():
-    """Główna funkcja orkiestrująca wielowątkowość."""
-    if not os.path.exists(os.path.dirname(OUTPUT_FILE)) and os.path.dirname(OUTPUT_FILE) != "": 
-        os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+def get_external_epg():
+    """Pobiera i filtruje dane EPG z zewnętrznego pliku XML."""
+    print("\n[INFO] Rozpoczynam pobieranie zewnętrznego pliku EPG (OtoPay)...")
+    external_xml = ""
+    try:
+        r = requests.get(EXTERNAL_EPG_URL, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
         
-    xml = '<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="AzmanGrabber Onet Multi v2.0">\n'
+        dodane_kanaly = set()
+        licznik_programow = 0
+
+        # Przetwarzanie definicji kanałów
+        for channel in root.findall('channel'):
+            ch_id = channel.get('id')
+            if ch_id in EXTERNAL_CHANNELS:
+                new_id = EXTERNAL_CHANNELS[ch_id]
+                display_name = channel.find('display-name')
+                name_text = display_name.text if display_name is not None else new_id
+                external_xml += f'  <channel id="{new_id}"><display-name>{name_text}</display-name></channel>\n'
+                dodane_kanaly.add(ch_id)
+
+        # Przetwarzanie programów
+        for programme in root.findall('programme'):
+            ch_id = programme.get('channel')
+            if ch_id in EXTERNAL_CHANNELS:
+                new_id = EXTERNAL_CHANNELS[ch_id]
+                programme.set('channel', new_id)
+                
+                # Zmiana obiektu XML na ciąg tekstowy (zachowanie struktury XML)
+                prog_str = ET.tostring(programme, encoding="unicode")
+                
+                # Ręczna korekta formatowania (wcięć) żeby plik wyglądał estetycznie
+                prog_str = '  ' + prog_str.replace('\n', '\n  ').strip() + '\n'
+                external_xml += prog_str
+                licznik_programow += 1
+                
+        print(f"[INFO] Sukces! Pomyślnie dodano {len(dodane_kanaly)} brakujących kanałów i {licznik_programow} audycji z zewnętrznego źródła.")
+        return external_xml
+    except Exception as e:
+        print(f"[BŁĄD] Nie udało się pobrać lub przetworzyć zewnętrznego EPG: {e}")
+        return ""
+
+def get_epg_multi():
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="AzmanGrabber Onet+OtoPay v3.0">\n'
     
-    # Tworzenie nagłówków kanałów
+    # Nagłówki kanałów Onet
     for name, (_, m3u_id) in CHANNELS.items():
         xml += f'  <channel id="{m3u_id}"><display-name>{name}</display-name></channel>\n'
 
-    print(f"[INFO] Rozpoczynam pobieranie na {MAX_WORKERS} wątkach jednocześnie...")
+    print(f"[INFO] Rozpoczynam pobieranie ONET na {MAX_WORKERS} wątkach jednocześnie...")
     
-    # Odpalamy silnik wielowątkowy
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(process_channel, name, slug, m3u_id): name for name, (slug, m3u_id) in CHANNELS.items()}
-        
         for future in concurrent.futures.as_completed(futures):
             try:
-                result_xml = future.result()
-                xml += result_xml
+                xml += future.result()
             except Exception as e:
-                print(f"Wystąpił krytyczny błąd w jednym z wątków: {e}")
+                print(f"Krytyczny błąd w wątku: {e}")
+
+    # Pobieranie z zewnętrznego EPG i doklejanie do całości
+    xml += get_external_epg()
 
     xml += '</tv>'
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f: 
+    
+    # Zapisywanie z kompresją GZIP
+    if not os.path.exists(os.path.dirname(OUTPUT_FILE)) and os.path.dirname(OUTPUT_FILE) != "": 
+        os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+        
+    print(f"[INFO] Kompresowanie do formatu .gz i zapisywanie...")
+    with gzip.open(OUTPUT_FILE, "wt", encoding="utf-8") as f: 
         f.write(xml)
         
-    # Podsumowanie czasu pracy
     end_time_pomiar = time.time()
     czas_trwania = end_time_pomiar - start_time_pomiar
     minuty = int(czas_trwania // 60)
     sekundy = int(czas_trwania % 60)
     print(f"\n[INFO] Zakończono sukcesem! Plik EPG: {OUTPUT_FILE}")
-    print(f"[INFO] Całkowity czas pobierania wielowątkowego wyniósł: {minuty} minut i {sekundy} sekund.")
+    print(f"[INFO] Całkowity czas pobierania i kompresji: {minuty} minut i {sekundy} sekund.")
 
 if __name__ == "__main__":
     get_epg_multi()
