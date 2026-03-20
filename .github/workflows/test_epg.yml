@@ -1,10 +1,12 @@
 name: Test Wielowątkowego EPG
 
 on:
-  workflow_dispatch:
+ workflow_dispatch:
   push:
     branches:
       - main
+  schedule:
+    - cron: '0 4 * * *'
 
 jobs:
   build:
