@@ -13,9 +13,9 @@ start_time_pomiar = time.time()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(BASE_DIR, "Output", "onet_test_full.xml")
 
-DAYS_TO_FETCH = 2 
-DEEP_SCAN = False 
-MAX_WORKERS = 10 
+DAYS_TO_FETCH = 12 
+DEEP_SCAN = True 
+MAX_WORKERS = 15 
 
 CHANNELS = {
     "13 Ulica": ("13-ulica-hd-509", "13Ulica.pl"),
