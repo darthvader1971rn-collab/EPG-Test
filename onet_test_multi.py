@@ -6,16 +6,22 @@ import time
 import re
 import concurrent.futures 
 import html
+import gzip
+import io
 
 start_time_pomiar = time.time()
 
 # --- KONFIGURACJA ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILE = os.path.join(BASE_DIR, "Output", "onet_test_full.xml")
+# Zmieniamy rozszerzenie na .gz
+OUTPUT_FILE_GZ = os.path.join(BASE_DIR, "Output", "onet_test_full.xml.gz")
 
-DAYS_TO_FETCH = 12 
+# DNI DO POBRANIA (Twoja strategia: Dziś, jutro, pojutrze + dzień 12)
+DAYS_TO_REFRESH = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+CATCHUP_DAYS = 7 # Jak głęboko w tył trzymamy historię
+
 DEEP_SCAN = True 
-MAX_WORKERS = 15 
+MAX_WORKERS = 15 # Twój Hardcore Mode
 
 CHANNELS = {
     "13 Ulica": ("13-ulica-hd-509", "13Ulica.pl"),
@@ -249,9 +255,7 @@ CHANNELS = {
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
 
 def clean_xml_text(text):
-    """Usuwa znaki kontrolne i zamienia znaki specjalne (np. & na &amp;), aby nie psuć struktury XML."""
-    if not text:
-        return ""
+    if not text: return ""
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
     return html.escape(text)
 
@@ -261,29 +265,19 @@ def get_deep_details(url):
         r = requests.get(full_url, headers=HEADERS, timeout=7)
         s = BeautifulSoup(r.text, 'lxml')
         rating, actors, directors, full_desc, age_limit = "", [], [], "", ""
-        
         desc_tag = s.find('p', class_='entryDesc')
         if desc_tag: full_desc = desc_tag.get_text(strip=True)
-        
         pegi_tag = s.find('span', class_=re.compile(r'pegi\d+'))
         if pegi_tag:
             for cls in pegi_tag.get('class', []):
                 if 'pegi' in cls and cls != 'pegi':
                     age_limit = cls.replace('pegi', '')
                     break
-
-        stars_tag = s.find('span', class_=re.compile(r'stars\d+'))
-        if stars_tag:
-            for cls in stars_tag.get('class', []):
-                if cls.startswith('stars') and len(cls) > 5:
-                    rating = f"{cls.replace('stars', '')}/5"
-
         cast_ul = s.find('ul', class_='cast')
         if cast_ul:
             curr = None
             for li in cast_ul.find_all('li'):
-                if 'header' in li.get('class', []):
-                    curr = li.get_text(strip=True).lower()
+                if 'header' in li.get('class', []): curr = li.get_text(strip=True).lower()
                 else:
                     names = [n.strip() for n in li.get_text(separator=' ', strip=True).split(',') if n.strip()]
                     if curr and 'obsada' in curr: actors.extend(names)
@@ -291,134 +285,150 @@ def get_deep_details(url):
         return rating, actors, directors, full_desc, age_limit
     except: return "", [], [], "", ""
 
-def process_single_channel(name, slug, m3u_id):
-    programmes_list = []
+def load_existing_epg():
+    """Wczytuje istniejący plik GZ i wyciąga z niego audycje do słownika."""
+    existing_data = {} # Klucz: (m3u_id, start_timestamp)
+    if not os.path.exists(OUTPUT_FILE_GZ):
+        return existing_data
+
+    print(f"[INFO] Wczytywanie archiwalnych danych z {OUTPUT_FILE_GZ}...")
+    try:
+        with gzip.open(OUTPUT_FILE_GZ, 'rb') as f:
+            content = f.read().decode('utf-8')
+            soup = BeautifulSoup(content, 'xml')
+            for prog in soup.find_all('programme'):
+                chid = prog.get('channel')
+                start = prog.get('start')
+                # Przechowujemy cały obiekt tagu, aby go później odtworzyć
+                existing_data[(chid, start)] = prog
+    except Exception as e:
+        print(f"[!] Nie udało się wczytać starego EPG: {e}")
+    return existing_data
+
+def fetch_day_data(name, slug, m3u_id, day_off):
+    """Pobiera dane tylko dla jednego konkretnego dnia."""
+    day_programmes = []
+    base_date = (datetime.datetime.now() + datetime.timedelta(days=day_off)).replace(hour=0, minute=0, second=0, microsecond=0)
+    url = f"https://programtv.onet.pl/program-tv/{slug}?dzien={day_off}&pelny-dzien=1"
     
-    for day_off in range(DAYS_TO_FETCH):
-        # Resetujemy zegar do północy, żeby móc poprawnie dodawać godziny audycji
-        base_date = (datetime.datetime.now() + datetime.timedelta(days=day_off)).replace(hour=0, minute=0, second=0, microsecond=0)
-        url = f"https://programtv.onet.pl/program-tv/{slug}?dzien={day_off}&pelny-dzien=1"
-        
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
-            soup = BeautifulSoup(r.text, 'lxml')
-            items = [li for li in soup.find_all('li') if li.find('div', class_='titles')]
-
-            last_h, shift = -1, 0
-            for item in items:
-                h_tag = item.find('span', class_='hour')
-                if not h_tag: continue
-                t_str = h_tag.get_text(strip=True)
-                if not re.match(r'^\d{2}:\d{2}$', t_str): continue
-                
-                h, m = map(int, t_str.split(':'))
-                if h < last_h and h < 5: shift += 1
-                last_h = h
-                
-                # Tworzymy prawdziwy obiekt czasu dla danej audycji
-                start_dt = base_date + datetime.timedelta(days=shift, hours=h, minutes=m)
-                
-                titles_div = item.find('div', class_='titles')
-                title_a = titles_div.find('a')
-                if not title_a: continue
-                
-                title = title_a.get_text(strip=True)
-                p_url = title_a.get('href')
-                
-                cat_tag = item.find('span', class_='type')
-                cat = cat_tag.get_text(strip=True) if cat_tag else ""
-                desc = item.find('p').get_text(strip=True) if item.find('p') else ""
-                
-                rate, acts, dirs, f_desc, age = "", [], [], "", ""
-                if DEEP_SCAN and p_url:
-                    rate, acts, dirs, f_desc, age = get_deep_details(p_url)
-                    if f_desc: desc = f_desc
-
-                # Zapisujemy audycję do tymczasowej listy zamiast od razu do XML
-                programmes_list.append({
-                    'start_dt': start_dt,
-                    'title': title,
-                    'desc': desc,
-                    'cat': cat,
-                    'age': age,
-                    'rate': rate,
-                    'acts': acts,
-                    'dirs': dirs
-                })
-
-            time.sleep(0.05)
-        except Exception as e:
-            print(f"BŁĄD ({name} - dzień {day_off}): {e}")
-
-    # ZMIANA: Sortujemy wszystkie zebrane audycje chronologicznie
-    programmes_list.sort(key=lambda x: x['start_dt'])
-    
-    channel_xml = ""
-    added_total = len(programmes_list)
-    
-    # ZMIANA: Generowanie struktury XML z wyliczaniem czasu STOP
-    for i, prog in enumerate(programmes_list):
-        start_str = prog['start_dt'].strftime("%Y%m%d%H%M00 +0100")
-        
-        # Jeśli to nie jest ostatnia audycja, stopem jest start następnej
-        if i < len(programmes_list) - 1:
-            stop_dt = programmes_list[i+1]['start_dt']
-        else:
-            # Awaryjny bufor 2 godzin dla ostatniej audycji na liście
-            stop_dt = prog['start_dt'] + datetime.timedelta(hours=2)
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, 'lxml')
+        items = [li for li in soup.find_all('li') if li.find('div', class_='titles')]
+        last_h, shift = -1, 0
+        for item in items:
+            h_tag = item.find('span', class_='hour')
+            if not h_tag: continue
+            t_str = h_tag.get_text(strip=True)
+            h, m = map(int, t_str.split(':'))
+            if h < last_h and h < 5: shift += 1
+            last_h = h
+            start_dt = base_date + datetime.timedelta(days=shift, hours=h, minutes=m)
+            titles_div = item.find('div', class_='titles')
+            title_a = titles_div.find('a')
+            if not title_a: continue
             
-        stop_str = stop_dt.strftime("%Y%m%d%H%M00 +0100")
-        
-        # Sterylizacja tekstów
-        safe_title = clean_xml_text(prog['title'])
-        safe_desc = clean_xml_text(prog['desc'])
-        safe_cat = clean_xml_text(prog['cat'])
+            p_url = title_a.get('href')
+            rate, acts, dirs, f_desc, age = "", [], [], "", ""
+            if DEEP_SCAN and p_url:
+                rate, acts, dirs, f_desc, age = get_deep_details(p_url)
+            
+            day_programmes.append({
+                'start_dt': start_dt,
+                'title': title_a.get_text(strip=True),
+                'desc': f_desc if f_desc else (item.find('p').get_text(strip=True) if item.find('p') else ""),
+                'cat': item.find('span', class_='type').get_text(strip=True) if item.find('span', class_='type') else "",
+                'age': age,
+                'rate': rate,
+                'acts': acts,
+                'dirs': dirs
+            })
+    except: pass
+    return day_programmes
 
-        channel_xml += f'  <programme start="{start_str}" stop="{stop_str}" channel="{m3u_id}">\n'
-        channel_xml += f'    <title lang="pl">{safe_title}</title>\n'
-        if safe_desc: channel_xml += f'    <desc lang="pl">{safe_desc}</desc>\n'
-        if safe_cat: channel_xml += f'    <category lang="pl">{safe_cat}</category>\n'
-        if prog['age']: channel_xml += f'    <rating system="advisory"><value>{prog["age"]}</value></rating>\n'
-        
-        if prog['acts'] or prog['dirs']:
-            channel_xml += '    <credits>\n'
-            for d in prog['dirs']: channel_xml += f'      <director>{clean_xml_text(d)}</director>\n'
-            for a in prog['acts']: channel_xml += f'      <actor>{clean_xml_text(a)}</actor>\n'
-            channel_xml += '    </credits>\n'
-        
-        if prog['rate']: channel_xml += f'    <star-rating><value>{prog["rate"]}</value></star-rating>\n'
-        channel_xml += f'  </programme>\n'
+def process_channel_smart(name, slug, m3u_id, existing_global_data):
+    """Łączy stare dane z nowymi dla jednego kanału."""
+    # 1. Wyciągnij stare audycje dla tego kanału
+    current_channel_data = {k[1]: v for k, v in existing_global_data.items() if k[0] == m3u_id}
+    
+    # 2. Pobierz nowe dane dla wybranych dni
+    new_progs = []
+    for d in DAYS_TO_REFRESH:
+        new_progs.extend(fetch_day_data(name, slug, m3u_id, d))
+    
+    # 3. Dodaj nowe do słownika (nadpisując stare jeśli się pokrywają startem)
+    for p in new_progs:
+        start_str = p['start_dt'].strftime("%Y%m%d%H%M00 +0100")
+        current_channel_data[start_str] = p
 
-    print(f"Zakończono: {name:16} -> Pobrano {added_total} audycji")
-    return channel_xml
+    # 4. Sortowanie i wyliczanie STOP
+    sorted_starts = sorted(current_channel_data.keys())
+    final_xml_part = ""
+    
+    now_limit = (datetime.datetime.now() - datetime.timedelta(days=CATCHUP_DAYS)).strftime("%Y%m%d%H%M00")
+
+    for i, start_key in enumerate(sorted_starts):
+        # Retencja: usuń jeśli starsze niż 7 dni
+        if start_key < now_limit: continue
+            
+        prog = current_channel_data[start_key]
+        
+        # Obliczanie stopu
+        if i < len(sorted_starts) - 1:
+            stop_val = sorted_starts[i+1]
+        else:
+            # Dla ostatniej audycji dodajemy 2h do startu
+            d = datetime.datetime.strptime(start_key[:14], "%Y%m%d%H%M") + datetime.timedelta(hours=2)
+            stop_val = d.strftime("%Y%m%d%H%M00 +0100")
+
+        # Jeśli to stary tag BeautifulSoup, po prostu go doklejamy (z aktualizacją stopu)
+        if hasattr(prog, 'name'):
+            prog['stop'] = stop_val
+            final_xml_part += str(prog) + "\n"
+        else:
+            # Jeśli to nowe dane (słownik), budujemy XML
+            final_xml_part += f'  <programme start="{start_key}" stop="{stop_val}" channel="{m3u_id}">\n'
+            final_xml_part += f'    <title lang="pl">{clean_xml_text(prog["title"])}</title>\n'
+            if prog['desc']: final_xml_part += f'    <desc lang="pl">{clean_xml_text(prog["desc"])}</desc>\n'
+            if prog['cat']: final_xml_part += f'    <category lang="pl">{clean_xml_text(prog["cat"])}</category>\n'
+            if prog['age']: final_xml_part += f'    <rating system="advisory"><value>{prog["age"]}</value></rating>\n'
+            if prog['acts'] or prog['dirs']:
+                final_xml_part += '    <credits>\n'
+                for d in prog['dirs']: final_xml_part += f'      <director>{clean_xml_text(d)}</director>\n'
+                for a in prog['acts']: final_xml_part += f'      <actor>{clean_xml_text(a)}</actor>\n'
+                final_xml_part += '    </credits>\n'
+            final_xml_part += f'  </programme>\n'
+            
+    print(f"Zaktualizowano: {name:16}")
+    return final_xml_part
 
 def get_epg():
-    if not os.path.exists(os.path.dirname(OUTPUT_FILE)): 
-        os.makedirs(os.path.dirname(OUTPUT_FILE))
-        
-    xml = '<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="AzmanGrabber Onet v2.0">\n'
-    for name, (_, m3u_id) in CHANNELS.items():
-        safe_name = clean_xml_text(name)
-        xml += f'  <channel id="{m3u_id}"><display-name>{safe_name}</display-name></channel>\n'
-
-    print(f"\n[INFO] Rozpoczynam pobieranie wielowątkowe (wątki: {MAX_WORKERS})...")
+    if not os.path.exists(os.path.dirname(OUTPUT_FILE_GZ)): os.makedirs(os.path.dirname(OUTPUT_FILE_GZ))
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(process_single_channel, name, slug, m3u_id) for name, (slug, m3u_id) in CHANNELS.items()]
-        
-        for future in concurrent.futures.as_completed(futures):
-            xml += future.result()
+    # KROK 1: Wczytaj to co już masz na GitHubie
+    existing_global_data = load_existing_epg()
+    
+    xml_header = '<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="AzmanGrabber Hardcore v3.0">\n'
+    for name, (_, m3u_id) in CHANNELS.items():
+        xml_header += f'  <channel id="{m3u_id}"><display-name>{clean_xml_text(name)}</display-name></channel>\n'
 
-    xml += '</tv>'
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f: 
-        f.write(xml)
-    print(f"\n--- SUKCES! Plik EPG: {OUTPUT_FILE} ---")
+    print(f"\n[INFO] Tryb Catchup: Odświeżanie dni {DAYS_TO_REFRESH}...")
+    
+    full_body = ""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(process_channel_smart, name, slug, m3u_id, existing_global_data) 
+                   for name, (slug, m3u_id) in CHANNELS.items()]
+        for future in concurrent.futures.as_completed(futures):
+            full_body += future.result()
+
+    final_xml = xml_header + full_body + '</tv>'
+    
+    # KROK 2: Zapisz jako skompresowany GZ
+    with gzip.open(OUTPUT_FILE_GZ, 'wt', encoding='utf-8') as f:
+        f.write(final_xml)
+        
+    print(f"\n--- SUKCES! Archiwum EPG zapisane w GZ: {OUTPUT_FILE_GZ} ---")
 
 if __name__ == "__main__":
     get_epg()
-    
-    end_time_pomiar = time.time()
-    czas_trwania = end_time_pomiar - start_time_pomiar
-    minuty = int(czas_trwania // 60)
-    sekundy = int(czas_trwania % 60)
-    print(f"\n[INFO] Zakończono sukcesem! Całkowity czas pobierania EPG wyniósł: {minuty} minut i {sekundy} sekund.")
+    print(f"\n[INFO] Czas operacji: {int((time.time() - start_time_pomiar)//60)} min {int((time.time() - start_time_pomiar)%60)} sek.")
