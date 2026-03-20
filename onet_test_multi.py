@@ -16,19 +16,19 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(BASE_DIR, "epg_onet_multi.xml.gz")
 
 # KRÓTKA PĘTLA DLA TESTÓW (Dzisiaj i Jutro)
-DAYS_TO_FETCH_LIST = [0, 1, 2] 
+DAYS_TO_FETCH_LIST = [0, 1] 
 DEEP_SCAN = False # Wyłączone dla maksymalnej szybkości diagnozy
 MAX_WORKERS = 5
 CATCHUP_DAYS_BACK = 7
 
-# --- LISTA KONTROLNA KANAŁÓW ---
+# --- LISTA KONTROLNA KANAŁÓW (ZAKTUALIZOWANE LINKI ONETU) ---
 CHANNELS = {
-    "TVN24": ("tvn-24-34", "TVN24.pl"),
-    "Canal+ Premium": ("canal-premium-1", "CanalPlusPremium.pl"),
-    "Canal+ Sport HD": ("canal-sport-120", "CanalPlusSport.pl"),
-    "Eurosport 1 HD": ("eurosport-1-65", "Eurosport1.pl"),
-    "Cartoon Network HD": ("cartoon-network-79", "CartoonNetwork.pl"),
-    "Extreme Sports HD": ("extreme-sports-channel-135", "ExtremeSportsHD.pl")
+    "TVN24": ("tvn-24-hd-158", "TVN24.pl"),
+    "Canal+ Premium": ("canal-hd-288", "CanalPlusPremium.pl"),
+    "Canal+ Sport HD": ("canal-sport-hd-12", "CanalPlusSport.pl"),
+    "Eurosport 1 HD": ("eurosport-1-hd-97", "Eurosport1.pl"),
+    "Cartoon Network HD": ("cartoon-network-hd-310", "CartoonNetwork.pl"),
+    "Extreme Sports HD": ("extreme-sports-channel-135", "ExtremeSportsHD.pl") # Testowy stary link
 }
 
 HEADERS = {
@@ -41,7 +41,7 @@ def clean_xml_text(text):
     """Sterylizuje tekst: usuwa niewidoczne znaki kontrolne i zabezpiecza HTML."""
     if not text:
         return ""
-    # Brutalne usunięcie znaków ASCII od 0 do 31 (z wyjątkiem formatowania tab/enter)
+    # Brutalne usunięcie znaków ASCII od 0 do 31 (z wyjątkiem formatowania)
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
     return html.escape(text)
 
@@ -54,7 +54,7 @@ def load_existing_epg():
     try:
         with gzip.open(OUTPUT_FILE, 'rb') as f:
             tree = ET.parse(f)
-            root = tree.getroot() # POPRAWIONY BŁĄD (get_root -> getroot)
+            root = tree.getroot()
             
             now = datetime.datetime.now()
             cutoff_date = (now - datetime.timedelta(days=CATCHUP_DAYS_BACK)).strftime("%Y%m%d")
@@ -88,7 +88,7 @@ def process_channel_smart(name, slug, m3u_id):
         url = f"https://programtv.onet.pl/program-tv/{slug}?dzien={day_off}&pelny-dzien=1"
         try:
             r = requests.get(url, headers=HEADERS, timeout=15)
-            r.raise_for_status() # Twardy sprawdzian - jeśli Onet nas zablokuje, wyrzuci tu błąd
+            r.raise_for_status() # Twardy sprawdzian - jeśli Onet odrzuci link (np. 404), wyrzuci błąd
             
             soup = BeautifulSoup(r.text, 'lxml')
             items = [li for li in soup.find_all('li') if li.find('div', class_='titles')]
@@ -124,9 +124,11 @@ def process_channel_smart(name, slug, m3u_id):
                 prog_xml += f'  </programme>\n'
                 new_programmes.append(((m3u_id, start), prog_xml))
             time.sleep(0.05)
+        except requests.exceptions.HTTPError as e:
+            # Tu wyłapiemy błędne/stare linki jak 404
+            print(f"[BŁĄD KRYTYCZNY] Onet zablokował dostęp (lub strona 404) dla {name} (dzień {day_off}): {e}")
         except Exception as e:
-            # Tu w końcu zobaczymy, dlaczego skrypt wywalał "0 audycji"
-            print(f"[BŁĄD KRYTYCZNY] Onet zablokował pobieranie dla {name} (dzień {day_off}): {e}")
+            print(f"[BŁĄD INNY] Błąd podczas pobierania {name} (dzień {day_off}): {e}")
             
     print(f"Onet: {name:20} -> Pobrano {len(new_programmes)} audycji")
     return new_programmes
