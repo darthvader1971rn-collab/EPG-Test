@@ -378,7 +378,7 @@ def process_channel_smart(name, slug, m3u_id, existing_global_data):
             stop_val = sorted_starts[i+1]
         else:
             # Dla ostatniej audycji dodajemy 2h do startu
-            d = datetime.datetime.strptime(start_key[:14], "%Y%m%d%H%M") + datetime.timedelta(hours=2)
+            d = datetime.datetime.strptime(start_key[:12], "%Y%m%d%H%M") + datetime.timedelta(hours=2)
             stop_val = d.strftime("%Y%m%d%H%M00 +0100")
 
         # Jeśli to stary tag BeautifulSoup, po prostu go doklejamy (z aktualizacją stopu)
