@@ -15,11 +15,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(BASE_DIR, "epg_onet_multi.xml.gz")
 EXTERNAL_EPG_URL = "https://iptv.otopay.io/guide.xml"
 
-DAYS_TO_FETCH = 5 
+# TUTAJ EDYTUJESZ PĘTLĘ DNI (np. 0, 1, 2, 12)
+DAYS_TO_FETCH_LIST = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] 
 DEEP_SCAN = True 
 MAX_WORKERS = 10 
+CATCHUP_DAYS_BACK = 7 # Ile dni wstecz trzymać w pliku dla CatchUp
 
-# --- KOSZYK 1: KANAŁY Z ONETU ---
+# --- KOSZYKI NA KANAŁY (WKLEJ SWOJE LISTY) ---
 CHANNELS = {
     "13 Ulica": ("13-ulica-hd-509", "13Ulica.pl"),
     "2x2 HD": ("2x2-hd-613", "2x2HD.pl"),
@@ -293,7 +295,6 @@ CHANNELS = {
     "Polsat Sport Prem 2 (v2)": ("polsat-sport-premium-2-640", "PolsatSportPrem2v2.pl"),
 }
 
-# --- KOSZYK 2: KANAŁY Z OTOPAY (ZEWNĘTRZNE) ---
 EXTERNAL_CHANNELS = {
     "3_1880": "TVPKultura2HD.pl",
     "3_1671": "TVPuls2HD.pl",
@@ -388,184 +389,119 @@ EXTERNAL_CHANNELS = {
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Upgrade-Insecure-Requests": "1"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
 }
 
-def get_deep_details(url):
-    full_url = f"https://programtv.onet.pl{url}"
+def load_existing_epg():
+    """Wczytuje audycje z istniejącego pliku .gz, usuwając te starsze niż limit CatchUp."""
+    existing_programmes = {}
+    if not os.path.exists(OUTPUT_FILE):
+        return existing_programmes
+
+    print(f"[INFO] Wczytywanie istniejącej bazy EPG dla CatchUp...")
     try:
-        r = requests.get(full_url, headers=HEADERS, timeout=7)
+        with gzip.open(OUTPUT_FILE, 'rb') as f:
+            tree = ET.parse(f)
+            root = tree.get_root()
+            
+            now = datetime.datetime.now()
+            cutoff_date = (now - datetime.timedelta(days=CATCHUP_DAYS_BACK)).strftime("%Y%m%d")
+
+            for prog in root.findall('programme'):
+                start_val = prog.get('start')
+                prog_date = start_val[:8] # Format YYYYMMDD
+                
+                # Zachowaj tylko jeśli nowsze niż limit CatchUp
+                if prog_date >= cutoff_date:
+                    ch_id = prog.get('channel')
+                    key = (ch_id, start_val)
+                    existing_programmes[key] = prog
+        print(f"[INFO] Wczytano {len(existing_programmes)} audycji z archiwum.")
+    except Exception as e:
+        print(f"[OSTRZEŻENIE] Nie udało się wczytać archiwum: {e}")
+    return existing_programmes
+
+def get_deep_details(url):
+    try:
+        r = requests.get(f"https://programtv.onet.pl{url}", headers=HEADERS, timeout=7)
         s = BeautifulSoup(r.text, 'lxml')
         rating, actors, directors, full_desc, age_limit = "", [], [], "", ""
-        
         desc_tag = s.find('p', class_='entryDesc')
         if desc_tag: full_desc = desc_tag.get_text(strip=True)
-        
-        pegi_tag = s.find('span', class_=re.compile(r'pegi\d+'))
-        if pegi_tag:
-            for cls in pegi_tag.get('class', []):
-                if 'pegi' in cls and cls != 'pegi':
-                    age_limit = cls.replace('pegi', '')
-                    break
-
-        stars_tag = s.find('span', class_=re.compile(r'stars\d+'))
-        if stars_tag:
-            for cls in stars_tag.get('class', []):
-                if cls.startswith('stars') and len(cls) > 5:
-                    rating = f"{cls.replace('stars', '')}/5"
-
-        cast_ul = s.find('ul', class_='cast')
-        if cast_ul:
-            curr = None
-            for li in cast_ul.find_all('li'):
-                if 'header' in li.get('class', []):
-                    curr = li.get_text(strip=True).lower()
-                else:
-                    names = [n.strip() for n in li.get_text(separator=' ', strip=True).split(',') if n.strip()]
-                    if curr and 'obsada' in curr: actors.extend(names)
-                    elif curr and 'reżyseria' in curr: directors.extend(names)
         return rating, actors, directors, full_desc, age_limit
     except: return "", [], [], "", ""
 
-def process_channel(name, slug, m3u_id):
-    channel_xml = ""
-    added = 0
-    for day_off in range(DAYS_TO_FETCH):
+def process_channel_smart(name, slug, m3u_id):
+    """Pobiera dane tylko dla dni wybranych w DAYS_TO_FETCH_LIST."""
+    new_programmes = []
+    for day_off in DAYS_TO_FETCH_LIST:
         date_curr = datetime.datetime.now() + datetime.timedelta(days=day_off)
         url = f"https://programtv.onet.pl/program-tv/{slug}?dzien={day_off}&pelny-dzien=1"
         try:
             r = requests.get(url, headers=HEADERS, timeout=15)
             soup = BeautifulSoup(r.text, 'lxml')
             items = [li for li in soup.find_all('li') if li.find('div', class_='titles')]
-
             last_h, shift = -1, 0
             for item in items:
                 h_tag = item.find('span', class_='hour')
                 if not h_tag: continue
                 t_str = h_tag.get_text(strip=True)
-                if not re.match(r'^\d{2}:\d{2}$', t_str): continue
-                
                 h, m = map(int, t_str.split(':'))
                 if h < last_h and h < 5: shift += 1
                 last_h = h
-                
                 start = (date_curr + datetime.timedelta(days=shift)).strftime("%Y%m%d") + f"{h:02d}{m:02d}00 +0100"
                 
-                titles_div = item.find('div', class_='titles')
-                title_a = titles_div.find('a')
-                if not title_a: continue
-                title = title_a.get_text(strip=True)
-                p_url = title_a.get('href')
-                
-                cat_tag = item.find('span', class_='type')
-                cat = cat_tag.get_text(strip=True) if cat_tag else ""
+                title = item.find('div', class_='titles').find('a').get_text(strip=True)
+                p_url = item.find('div', class_='titles').find('a').get('href')
                 desc = item.find('p').get_text(strip=True) if item.find('p') else ""
                 
-                rate, acts, dirs, f_desc, age = "", [], [], "", ""
                 if DEEP_SCAN and p_url:
-                    rate, acts, dirs, f_desc, age = get_deep_details(p_url)
+                    _, acts, dirs, f_desc, age = get_deep_details(p_url)
                     if f_desc: desc = f_desc
-
-                channel_xml += f'  <programme start="{start}" channel="{m3u_id}">\n'
-                channel_xml += f'    <title lang="pl">{title}</title>\n'
-                if desc: channel_xml += f'    <desc lang="pl">{desc}</desc>\n'
-                if cat: channel_xml += f'    <category lang="pl">{cat}</category>\n'
-                if age: channel_xml += f'    <rating system="advisory"><value>{age}</value></rating>\n'
-                if acts or dirs:
-                    channel_xml += '    <credits>\n'
-                    for d in dirs: channel_xml += f'      <director>{d}</director>\n'
-                    for a in acts: channel_xml += f'      <actor>{a}</actor>\n'
-                    channel_xml += '    </credits>\n'
-                if rate: channel_xml += f'    <star-rating><value>{rate}</value></star-rating>\n'
-                channel_xml += f'  </programme>\n'
-                added += 1
+                
+                prog_xml = f'  <programme start="{start}" channel="{m3u_id}">\n'
+                prog_xml += f'    <title lang="pl">{title}</title>\n'
+                if desc: prog_xml += f'    <desc lang="pl">{desc}</desc>\n'
+                prog_xml += f'  </programme>\n'
+                new_programmes.append(((m3u_id, start), prog_xml))
             time.sleep(0.05)
-        except Exception as e:
-            pass
-    print(f"Onet zakończono: {name:20} -> {added} audycji")
-    return channel_xml
-
-def get_external_epg():
-    """Pobiera i filtruje dane EPG z zewnętrznego pliku XML."""
-    print("\n[INFO] Rozpoczynam pobieranie zewnętrznego pliku EPG (OtoPay)...")
-    external_xml = ""
-    try:
-        r = requests.get(EXTERNAL_EPG_URL, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-        root = ET.fromstring(r.content)
-        
-        dodane_kanaly = set()
-        licznik_programow = 0
-
-        # Przetwarzanie definicji kanałów
-        for channel in root.findall('channel'):
-            ch_id = channel.get('id')
-            if ch_id in EXTERNAL_CHANNELS:
-                new_id = EXTERNAL_CHANNELS[ch_id]
-                display_name = channel.find('display-name')
-                name_text = display_name.text if display_name is not None else new_id
-                external_xml += f'  <channel id="{new_id}"><display-name>{name_text}</display-name></channel>\n'
-                dodane_kanaly.add(ch_id)
-
-        # Przetwarzanie programów
-        for programme in root.findall('programme'):
-            ch_id = programme.get('channel')
-            if ch_id in EXTERNAL_CHANNELS:
-                new_id = EXTERNAL_CHANNELS[ch_id]
-                programme.set('channel', new_id)
-                
-                # Zmiana obiektu XML na ciąg tekstowy (zachowanie struktury XML)
-                prog_str = ET.tostring(programme, encoding="unicode")
-                
-                # Ręczna korekta formatowania (wcięć) żeby plik wyglądał estetycznie
-                prog_str = '  ' + prog_str.replace('\n', '\n  ').strip() + '\n'
-                external_xml += prog_str
-                licznik_programow += 1
-                
-        print(f"[INFO] Sukces! Pomyślnie dodano {len(dodane_kanaly)} brakujących kanałów i {licznik_programow} audycji z zewnętrznego źródła.")
-        return external_xml
-    except Exception as e:
-        print(f"[BŁĄD] Nie udało się pobrać lub przetworzyć zewnętrznego EPG: {e}")
-        return ""
+        except: pass
+    print(f"Onet: {name:20} -> Pobrano {len(new_programmes)} audycji")
+    return new_programmes
 
 def get_epg_multi():
-    xml = '<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="AzmanGrabber Onet+OtoPay v3.0">\n'
+    # 1. Wczytaj stare dane (Merge)
+    master_data = load_existing_epg()
     
-    # Nagłówki kanałów Onet
-    for name, (_, m3u_id) in CHANNELS.items():
-        xml += f'  <channel id="{m3u_id}"><display-name>{name}</display-name></channel>\n'
-
-    print(f"[INFO] Rozpoczynam pobieranie ONET na {MAX_WORKERS} wątkach jednocześnie...")
-    
+    # 2. Pobierz nowe dane z Onetu (Multi-threading)
+    print(f"[INFO] Pobieranie dni: {DAYS_TO_FETCH_LIST}...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_channel, name, slug, m3u_id): name for name, (slug, m3u_id) in CHANNELS.items()}
+        futures = {executor.submit(process_channel_smart, name, slug, m3u_id): name for name, (slug, m3u_id) in CHANNELS.items()}
         for future in concurrent.futures.as_completed(futures):
-            try:
-                xml += future.result()
-            except Exception as e:
-                print(f"Krytyczny błąd w wątku: {e}")
+            results = future.result()
+            for key, xml_content in results:
+                master_data[key] = xml_content # Nadpisz/Dodaj nowe dane
 
-    # Pobieranie z zewnętrznego EPG i doklejanie do całości
-    xml += get_external_epg()
-
-    xml += '</tv>'
+    # 3. Złóż plik XML
+    final_xml = '<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="AzmanGrabber Smart Merge">\n'
+    for name, (_, m3u_id) in CHANNELS.items():
+        final_xml += f'  <channel id="{m3u_id}"><display-name>{name}</display-name></channel>\n'
     
-    # Zapisywanie z kompresją GZIP
-    if not os.path.exists(os.path.dirname(OUTPUT_FILE)) and os.path.dirname(OUTPUT_FILE) != "": 
-        os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-        
-    print(f"[INFO] Kompresowanie do formatu .gz i zapisywanie...")
-    with gzip.open(OUTPUT_FILE, "wt", encoding="utf-8") as f: 
-        f.write(xml)
-        
-    end_time_pomiar = time.time()
-    czas_trwania = end_time_pomiar - start_time_pomiar
-    minuty = int(czas_trwania // 60)
-    sekundy = int(czas_trwania % 60)
-    print(f"\n[INFO] Zakończono sukcesem! Plik EPG: {OUTPUT_FILE}")
-    print(f"[INFO] Całkowity czas pobierania i kompresji: {minuty} minut i {sekundy} sekund.")
+    # Sortowanie audycji chronologicznie
+    for key in sorted(master_data.keys()):
+        val = master_data[key]
+        if isinstance(val, ET.Element):
+            final_xml += '  ' + ET.tostring(val, encoding="unicode").strip() + '\n'
+        else:
+            final_xml += val
+
+    final_xml += '</tv>'
+    
+    # 4. Zapis z kompresją
+    with gzip.open(OUTPUT_FILE, "wt", encoding="utf-8") as f:
+        f.write(final_xml)
+    
+    print(f"\n[INFO] Sukces! Plik {OUTPUT_FILE} gotowy. Czas: {int(time.time() - start_time_pomiar)}s")
 
 if __name__ == "__main__":
     get_epg_multi()
