@@ -1,18 +1,18 @@
-name: Test Wielowątkowego EPG
+name: Archiwum EPG - Automat GZ
 
 on:
- workflow_dispatch:
+  workflow_dispatch: # Przycisk do ręcznego odpalania
   push:
     branches:
-      - main
+      - main # Odpala po każdej Twojej zmianie w kodzie
   schedule:
-    - cron: '0 4 * * *'
+    - cron: '0 4 * * *' # Cichy automat codziennie o 4:00 rano czasu UTC
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # Kluczowe uprawnienie, aby bot mógł zapisać plik .gz
 
     steps:
       - name: Pobieranie repozytorium
@@ -28,13 +28,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
-      - name: Uruchomienie skryptu EPG (Multi)
+      - name: Uruchomienie skryptu EPG (Multi-GZ)
+        # WAŻNE: Upewnij się, że nazwa pliku poniżej (onet_test_multi.py) 
+        # jest identyczna z tą, którą masz na GitHubie!
         run: python onet_test_multi.py
 
-      - name: Zapis wyników do repozytorium
+      - name: Zapis wyników i archiwum do repozytorium
         run: |
-          git config --global user.name "EPG-Test-Bot"
-          git config --global user.email "bot@example.com"
-          git add -A
-          git diff --quiet && git diff --staged --quiet || git commit -m "Test wielowątkowości EPG"
+          git config --global user.name "EPG-Archiwum-Bot"
+          git config --global user.email "bot@epg-auto.com"
+          
+          # Dodajemy wszystkie zmiany, w tym nowy folder Output i skompresowane pliki .gz
+          git add -A 
+          
+          # Sprawdzamy czy powstały nowe dane. Jeśli tak - commitujemy i wysyłamy.
+          # Jeśli zmian nie ma (np. Onet nie zaktualizował programu), skrypt się nie wywali.
+          git diff --quiet && git diff --staged --quiet || git commit -m "Aktualizacja bazy EPG (Format GZ + Catchup)"
           git push
