@@ -5,8 +5,8 @@ on:
   push:
     branches:
       - main # Odpala po każdej Twojej zmianie w kodzie
-  schedule:
-    - cron: '0 4 * * *' # Cichy automat codziennie o 4:00 rano czasu UTC
+  # schedule:
+  #   - cron: '0 4 * * *' # Cichy automat codziennie o 4:00 rano czasu UTC
 
 jobs:
   build:
